@@ -1,23 +1,3 @@
-// =============================================================
-//  axi_ram.sv  -  Fixed version
-//
-//  FIX 1: RLAST was asserted one beat too early.
-//          Old: S_AXI_RLAST <= (beat_cnt + 1 == burst_len)
-//               This fired on beat N-2, so beat N-1 (the last
-//               real beat) arrived with RLAST already high from
-//               the previous cycle - the icache stored it at
-//               beat_cnt=2 instead of 3, leaving word[3] as X.
-//          New: S_AXI_RLAST <= (beat_cnt == burst_len)
-//               RLAST is now asserted on the SAME cycle as the
-//               last data beat, matching AXI4 protocol.
-//
-//  FIX 2: Test program loaded stores to addr 0x0000 (instruction
-//          space).  New program uses LUI to build base = 0x1000
-//          and directs all loads/stores to the data region
-//          (word address 0x400+), keeping instruction and data
-//          address spaces completely separate.
-// =============================================================
-
 `timescale 1ns / 1ps
 
 module axi_ram (
