@@ -1,15 +1,6 @@
-`timescale 1ns / 1ps
+`timescale 1ns / 1ps 
 
-// ============================================================
-// FIX SUMMARY:
-// 1. PC stall now includes dcache_busy (was missing before)
-// 2. Cache stall propagates correctly: StallF/StallD include both caches
-// 3. ForwardAE == 2'b11 (load bypass) gated by dcache_valid_data
-// 4. Branch comparisons now use SrcBE (post-mux), not SrcB (pre-mux)
-// 5. D-cache re-issue prevented: MemAccess strobe only pulses once per miss
-// ============================================================
-
-module rvhazard(
+module cpu(
     input logic clk,
     input logic reset
 );
