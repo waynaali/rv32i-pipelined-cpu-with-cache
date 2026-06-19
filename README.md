@@ -1,108 +1,384 @@
-**rv32i-pipelined-cpu-with-cache**
+# RV32I Pipelined CPU with Non-Blocking Caches
 
-A 5-stage pipelined RISC-V RV32I processor with non-blocking instruction and data caches connected over AXI4, implemented in SystemVerilog and verified in Vivado XSim.
+A 5-stage pipelined RISC-V RV32I processor with non-blocking instruction and data caches connected through an AXI4-compatible memory subsystem, implemented in SystemVerilog and verified using Vivado XSim.
 
-This project implements a classic 5-stage in-order pipeline (Fetch → Decode → Execute → Memory → Writeback) for the RV32I base integer instruction set, backed by separate instruction and data caches that communicate with memory through an AXI4-style burst interface. Both caches are non-blocking: a miss on one line doesn't prevent a hit on another line from being served the same cycle ("hit-under-miss"), and the data cache additionally supports early-forwarding of the requested word straight off the refill bus before the line finishes filling.
+## Overview
 
-**Features**
+This project implements a classic in-order 5-stage RISC-V pipeline:
 
-- ISA: RV32I base integer instruction set
-- Pipeline: 5 stages — IF, ID, EX, MEM, WB
-- Hazard handling: full data forwarding (EX/MEM and MEM/WB) to resolve RAW hazards; pipeline stalls on load-use hazards and on branch resolution (static, no branch prediction — branches are resolved before the next instruction is committed down the resolved path)
-- Memory system: separate non-blocking I-cache and D-cache (see Cache Configuration below)
-- Bus interface: burst-capable memory interface (AXI4-style: req/ready handshake, multi-beat rdata with rvalid/rlast) from each cache to memory
-- Verification: self-checking testbenches simulated in Vivado XSim
+**Fetch → Decode → Execute → Memory → Writeback**
 
-**Architecture**
+The processor supports the complete RV32I base integer instruction set and integrates separate instruction and data caches. Both caches support **hit-under-miss** operation, allowing cache hits to be serviced even while another cache line refill is in progress.
 
-```
+The data cache additionally supports **early forwarding**, returning the requested word directly from the refill bus before the entire cache line has completed loading.
+
+---
+
+## Features
+
+### Processor Core
+
+* RV32I Base Integer ISA
+* 5-stage pipelined architecture
+
+  * IF (Instruction Fetch)
+  * ID (Instruction Decode)
+  * EX (Execute)
+  * MEM (Memory Access)
+  * WB (Write Back)
+* Register file with writeback support
+* ALU supporting arithmetic, logical, comparison, and shift operations
+
+### Hazard Handling
+
+* Full forwarding network
+
+  * EX/MEM → EX
+  * MEM/WB → EX
+* Load-use hazard detection and pipeline stalls
+* Branch and jump flushing
+* Static branch handling (no branch prediction)
+
+### Cache System
+
+* Separate instruction and data caches
+* Direct-mapped organization
+* Non-blocking operation
+* Hit-under-miss support
+* Burst line refill mechanism
+* Early-forwarding during cache refill
+
+### Data Cache Features
+
+* Write-through policy
+* Write-allocate on misses
+* Byte, halfword, and word accesses
+* Store merging during refill
+* Early-forward path for pending load requests
+
+### Memory Interface
+
+* Burst-capable cache-to-memory interface
+* AXI4 master adapter support
+* Multi-beat line refill transactions
+* Single-beat write-through transactions
+
+### Verification
+
+* Self-checking testbenches
+* Vivado XSim simulation environment
+* ISA-level instruction validation
+* Cache functionality verification
+* Pipeline hazard testing
+* Memory subsystem testing
+
+---
+
+## Architecture
+
+```text
         ┌──────┐   ┌──────┐   ┌──────┐   ┌──────┐   ┌──────┐
         │  IF  │──▶│  ID  │──▶│  EX  │──▶│ MEM  │──▶│  WB  │
         └──┬───┘   └──────┘   └──┬───┘   └──┬───┘   └──────┘
            │                     │           │
            ▼                     ▼           ▼
-       ┌────────┐           forwarding   ┌────────┐
+       ┌────────┐           Forwarding   ┌────────┐
        │ I-Cache│                        │ D-Cache│
        └───┬────┘                        └───┬────┘
            │                                  │
            └───────────────┬──────────────────┘
-                            ▼
-                      AXI4 Interconnect
-                            ▼
-                          Memory
+                           ▼
+                   AXI4 Interconnect
+                           ▼
+                         Memory
 ```
 
-IF fetches instructions from the I-cache and stalls (`busy`) on an I-cache miss. ID decodes the instruction, reads the register file, and detects hazards. EX performs ALU operations, branch/jump resolution, and address generation. MEM issues loads/stores to the D-cache; non-blocking misses allow a hit on a different line to be served in the same cycle. WB writes results back to the register file.
+### Pipeline Operation
 
-**Hazard handling**
+| Stage | Function                                      |
+| ----- | --------------------------------------------- |
+| IF    | Fetch instruction from I-cache                |
+| ID    | Decode instruction and read register operands |
+| EX    | Execute ALU operations and branch resolution  |
+| MEM   | Load/store access through D-cache             |
+| WB    | Write results back to register file           |
 
-Data hazards are resolved via full forwarding from EX/MEM and MEM/WB pipeline registers back into EX. Load-use hazards, where a dependent instruction immediately follows a load, still require a stall since the loaded value isn't available until MEM. Control hazards are handled statically — there is no branch predictor. The pipeline stalls/flushes on branches and jumps until the target and outcome are resolved, then resumes fetch from the correct path. Structural hazards are mitigated by the non-blocking cache design: a miss on one cache line does not force a stall on a CPU access that hits a different, already-valid line.
+---
 
-**Cache configuration**
+## Hazard Handling
 
-Parameters below are taken directly from the RTL (`icache_nonblocking`, `dcache_nonblocking`).
+### Data Hazards
 
-| Parameter | I-Cache | D-Cache |
-|---|---|---|
-| Organization | Direct-mapped | Direct-mapped |
-| Lines | 64 | 16 |
-| Index bits | 6 | 4 |
-| Tag bits | 22 | 24 |
-| Line size | 4 words (16 bytes) | 4 words (16 bytes) |
-| Capacity | 1 KB (64 × 16 B) | 256 B (16 × 16 B) |
-| Access type | Read-only | Read/write, byte/half/word (`funct3`-decoded) |
-| Write policy | N/A | Write-through, write-allocate on miss |
-| Replacement | N/A (direct-mapped) | N/A (direct-mapped) |
-| Miss handling | Non-blocking (hit-under-miss) | Non-blocking (hit-under-miss + early-forward) |
+Most Read-After-Write (RAW) hazards are resolved through forwarding:
 
-Address breakdown — I-cache: `addr[31:10]` = tag, `addr[9:4]` = index, `addr[3:2]` = word offset. D-cache: `addr[31:8]` = tag, `addr[7:4]` = index, `addr[3:2]` = word offset, `addr[1:0]` = byte offset.
-
-The D-cache is write-through, not write-back — every write hit updates the cache line and immediately issues a single-beat write-through transaction to memory (`WRITE_HIT_WAIT`); there is no dirty bit or deferred writeback on eviction. A write miss triggers write-allocate: the line is fetched via the same burst-refill path as a read miss, the pending store is merged into the arriving beat, and a write-through to memory follows (`WRITE_ALLOC_WAIT`).
-
-For non-blocking behavior, the I-cache serves a CPU access to a different, already-valid line as a normal hit even while another line is being refilled, and forwards the requested word directly off the refill bus the cycle it arrives rather than waiting for the whole line to finish filling. The D-cache behaves the same way for reads, plus an early-forward path that returns the requested word straight off the incoming refill beat, unless that exact beat is also the target of a pending merged store, in which case it waits one more cycle for the merge to complete.
-
-**Memory interface**
-
-Each cache drives a simple burst request/response interface rather than raw AXI4 channels:
-
-| Signal | Direction | Meaning |
-|---|---|---|
-| `mem_req` | cache → mem | Burst request, held high until `mem_ready` |
-| `mem_addr` | cache → mem | Line-aligned burst address (reads) or single-beat byte address (D-cache write-through) |
-| `mem_burst_len` | cache → mem | Number of words requested (4 for line fills, 1 for write-through) |
-| `mem_we` / `mem_be` / `mem_wdata` | cache → mem | Write enable, byte-enables, and write data (D-cache only) |
-| `mem_rdata` / `mem_rvalid` / `mem_rlast` | mem → cache | One beat of burst data per cycle, with `rlast` marking the final beat |
-| `mem_ready` | mem → cache | One-cycle pulse acknowledging that `mem_req` was accepted |
-
-This interface is intended to sit behind an AXI4 master adapter (`cache_axi4_master` in the codebase) that translates it to AXI4 read/write address and data channels.
-
-**Repository structure**
-
+```text
+EX/MEM ─────► EX
+MEM/WB ─────► EX
 ```
+
+### Load-Use Hazards
+
+When an instruction immediately depends on a load result, the pipeline inserts a stall because the loaded value becomes available only in the MEM stage.
+
+Example:
+
+```assembly
+lw   x5, 0(x1)
+add  x6, x5, x2   # requires stall
+```
+
+### Control Hazards
+
+Branches and jumps are resolved in the execute stage.
+
+The processor uses:
+
+* No branch prediction
+* Pipeline flush on taken branches
+* Correct-path refetch after branch resolution
+
+---
+
+## Cache Configuration
+
+### Instruction Cache
+
+| Parameter     | Value         |
+| ------------- | ------------- |
+| Organization  | Direct-Mapped |
+| Lines         | 64            |
+| Line Size     | 16 Bytes      |
+| Words/Line    | 4             |
+| Capacity      | 1 KB          |
+| Tag Bits      | 22            |
+| Index Bits    | 6             |
+| Access Type   | Read Only     |
+| Miss Handling | Non-Blocking  |
+
+Address format:
+
+```text
+31          10 9      4 3    2 1 0
++-------------+--------+------+---+
+|     Tag     | Index  | Word |00 |
++-------------+--------+------+---+
+```
+
+---
+
+### Data Cache
+
+| Parameter         | Value          |
+| ----------------- | -------------- |
+| Organization      | Direct-Mapped  |
+| Lines             | 16             |
+| Line Size         | 16 Bytes       |
+| Words/Line        | 4              |
+| Capacity          | 256 B          |
+| Tag Bits          | 24             |
+| Index Bits        | 4              |
+| Access Type       | Read / Write   |
+| Write Policy      | Write-Through  |
+| Allocation Policy | Write-Allocate |
+| Miss Handling     | Non-Blocking   |
+
+Address format:
+
+```text
+31           8 7      4 3    2 1   0
++-------------+--------+------+-----+
+|     Tag     | Index  | Word |Byte |
++-------------+--------+------+-----+
+```
+
+---
+
+## Non-Blocking Cache Behavior
+
+### Hit-Under-Miss
+
+A cache miss does not prevent other accesses from being serviced.
+
+Example:
+
+```text
+Miss: Line A being refilled
+Hit : Line B requested
+
+Result:
+Line B is served immediately.
+```
+
+### Early Forwarding
+
+When the requested word arrives during a refill:
+
+```text
+Memory → Refill Bus → CPU
+```
+
+The word is forwarded directly without waiting for the remainder of the cache line.
+
+---
+
+## Data Cache Write Policy
+
+### Write Hit
+
+1. Update cache line
+2. Issue write-through transaction
+3. Wait for memory acknowledgement
+
+```text
+CPU Store
+    │
+    ▼
+ D-Cache Update
+    │
+    ▼
+ Memory Write
+```
+
+### Write Miss
+
+1. Allocate line
+2. Refill cache line
+3. Merge pending store
+4. Write-through updated data
+
+```text
+Store Miss
+     │
+     ▼
+Line Refill
+     │
+     ▼
+Store Merge
+     │
+     ▼
+Write-Through
+```
+
+---
+
+## Memory Interface
+
+Caches communicate using a burst-oriented memory interface.
+
+| Signal        | Direction      | Description         |
+| ------------- | -------------- | ------------------- |
+| mem_req       | Cache → Memory | Request transaction |
+| mem_addr      | Cache → Memory | Address             |
+| mem_burst_len | Cache → Memory | Burst length        |
+| mem_we        | Cache → Memory | Write enable        |
+| mem_be        | Cache → Memory | Byte enables        |
+| mem_wdata     | Cache → Memory | Write data          |
+| mem_ready     | Memory → Cache | Request accepted    |
+| mem_rdata     | Memory → Cache | Read data beat      |
+| mem_rvalid    | Memory → Cache | Data valid          |
+| mem_rlast     | Memory → Cache | Final burst beat    |
+
+---
+
+## Repository Structure
+
+```text
 rv32i-pipelined-cpu-with-cache/
-├── rtl/              # SystemVerilog source (pipeline stages, caches, AXI interface)
-├── tb/               # Testbenches
-├── sim/              # Simulation scripts / waveform configs
-├── sw/               # Test programs / assembly used for verification
+│
+├── rtl/
+│   ├── pipeline/
+│   ├── cache/
+│   ├── axi/
+│   └── memory/
+│
+├── tb/
+│   ├── cpu_tb.sv
+│   ├── icache_tb.sv
+│   ├── dcache_tb.sv
+│   └── memory_tb.sv
+│
+├── sim/
+│   ├── scripts/
+│   └── waveforms/
+│
+├── sw/
+│   ├── isa_tests/
+│   ├── cache_tests/
+│   └── benchmarks/
+│
 └── README.md
 ```
 
+---
 
-**Verification**
+## Verification
 
-The design is verified using self-checking testbenches run in Vivado XSim, covering ISA-level instruction tests (arithmetic, logical, branch, load/store), pipeline hazard scenarios (RAW dependencies, load-use stalls, branch flushes), cache behavior (hits, misses, hit-under-miss, write-through, write-allocate), and burst/AXI4 transaction correctness.
+The processor has been verified using self-checking testbenches in Vivado XSim.
 
-**Status / roadmap**
+### Tested Areas
 
-- [x] 5-stage in-order pipeline
-- [x] Data forwarding and hazard stalls
-- [x] Non-blocking, direct-mapped I-cache and D-cache
-- [x] Burst memory interface / AXI4 master adapter
-- [ ] Branch prediction
-- [ ] Set-associative caches
-- [ ] Exception / interrupt support
-- [ ] FPGA synthesis and on-board validation
+#### ISA Validation
 
-**License**
+* Arithmetic instructions
+* Logical instructions
+* Shift operations
+* Branches and jumps
+* Loads and stores
 
-(Add license information.)
+#### Pipeline Verification
+
+* RAW hazard forwarding
+* Load-use stalls
+* Branch flushing
+* Pipeline recovery
+
+#### Cache Verification
+
+* Cache hits and misses
+* Hit-under-miss behavior
+* Early forwarding
+* Write-through operation
+* Write-allocate handling
+* Line refills
+
+#### Memory Interface
+
+* Burst reads
+* Burst writes
+* AXI4 adapter correctness
+* Transaction ordering
+
+---
+
+## Current Status
+
+### Completed
+
+* [x] RV32I Processor Core
+* [x] 5-Stage Pipeline
+* [x] Forwarding Network
+* [x] Hazard Detection Unit
+* [x] Non-Blocking I-Cache
+* [x] Non-Blocking D-Cache
+* [x] Burst Memory Interface
+* [x] AXI4 Master Adapter
+* [x] Self-Checking Testbenches
+
+### Planned Enhancements
+
+* [ ] Dynamic Branch Prediction
+* [ ] Set-Associative Cache Designs
+* [ ] Exception Handling
+* [ ] Interrupt Support
+* [ ] CSR Instructions
+* [ ] FPGA Synthesis
+* [ ] FPGA Board Validation
+
+---
+
+## Tools Used
+
+* SystemVerilog
+* Vivado XSim
+* AXI4 Protocol
+* RISC-V RV32I ISA
