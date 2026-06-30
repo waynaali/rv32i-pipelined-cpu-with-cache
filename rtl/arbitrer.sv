@@ -1,151 +1,212 @@
 `timescale 1ns / 1ps
+
 module cache_axi4_master (
-    input logic clk,
-    input logic reset,
-    // I-cache
-    input logic i_mem_req,
-    input logic [31:0] i_mem_addr,
-    input logic [3:0] i_mem_burst_len,
-    output logic [31:0] i_mem_rdata,
-    output logic i_mem_rvalid,
-    output logic i_mem_rlast,
-    output logic i_mem_ready,
-    // D-cache
-    input logic d_mem_req,
-    input logic d_mem_we,
-    input logic [3:0] d_mem_be,
-    input logic [31:0] d_mem_addr,
-    input logic [31:0] d_mem_wdata,
-    input logic [3:0] d_mem_burst_len,
-    output logic [31:0] d_mem_rdata,
-    output logic d_mem_rvalid,
-    output logic d_mem_rlast,
-    output logic d_mem_ready,
-    // AXI4
+    input  logic        clk,
+    input  logic        reset,
+
+    // I-Cache Interface
+    input  logic        i_req,
+    input  logic [31:0] i_addr,
+    output logic [31:0] i_rdata,
+    output logic        i_ready,
+
+    // D-Cache Interface
+    input  logic        d_req,
+    input  logic        d_we,
+    input  logic [3:0]  d_be,
+    input  logic [31:0] d_addr,
+    input  logic [31:0] d_wdata,
+    output logic [31:0] d_rdata,
+    output logic        d_ready,
+
+    // AXI4 Write Address Channel
     output logic [31:0] M_AXI_AWADDR,
-    output logic [7:0] M_AXI_AWLEN,
-    output logic [2:0] M_AXI_AWSIZE,
-    output logic [1:0] M_AXI_AWBURST,
-    output logic M_AXI_AWVALID,
-    input logic M_AXI_AWREADY,
+    output logic [7:0]  M_AXI_AWLEN,
+    output logic [2:0]  M_AXI_AWSIZE,
+    output logic [1:0]  M_AXI_AWBURST,
+    output logic        M_AXI_AWVALID,
+    input  logic        M_AXI_AWREADY,
+
+    // AXI4 Write Data Channel
     output logic [31:0] M_AXI_WDATA,
-    output logic [3:0] M_AXI_WSTRB,
-    output logic M_AXI_WLAST,
-    output logic M_AXI_WVALID,
-    input logic M_AXI_WREADY,
-    input logic [1:0] M_AXI_BRESP,
-    input logic M_AXI_BVALID,
-    output logic M_AXI_BREADY,
+    output logic [3:0]  M_AXI_WSTRB,
+    output logic        M_AXI_WLAST,
+    output logic        M_AXI_WVALID,
+    input  logic        M_AXI_WREADY,
+
+    // AXI4 Write Response Channel
+    input  logic [1:0]  M_AXI_BRESP,
+    input  logic        M_AXI_BVALID,
+    output logic        M_AXI_BREADY,
+
+    // AXI4 Read Address Channel
     output logic [31:0] M_AXI_ARADDR,
-    output logic [7:0] M_AXI_ARLEN,
-    output logic [2:0] M_AXI_ARSIZE,
-    output logic [1:0] M_AXI_ARBURST,
-    output logic M_AXI_ARVALID,
-    input logic M_AXI_ARREADY,
-    input logic [31:0] M_AXI_RDATA,
-    input logic [1:0] M_AXI_RRESP,
-    input logic M_AXI_RVALID,
-    input logic M_AXI_RLAST,
-    output logic M_AXI_RREADY
+    output logic [7:0]  M_AXI_ARLEN,
+    output logic [2:0]  M_AXI_ARSIZE,
+    output logic [1:0]  M_AXI_ARBURST,
+    output logic        M_AXI_ARVALID,
+    input  logic        M_AXI_ARREADY,
+
+    // AXI4 Read Data Channel
+    input  logic [31:0] M_AXI_RDATA,
+    input  logic [1:0]  M_AXI_RRESP,
+    input  logic        M_AXI_RLAST,
+    input  logic        M_AXI_RVALID,
+    output logic        M_AXI_RREADY
 );
 
+    // State machine optimized for continuous streaming throughput
     typedef enum logic [2:0] {
-        IDLE, READ_ADDR, READ_DATA, WRITE_ADDR, WRITE_RESP
+        IDLE,
+        READ_ADDR,
+        READ_DATA,
+        WRITE_EXECUTE,
+        WRITE_RESP
     } state_t;
+
     state_t state;
 
-    logic [31:0] active_addr, active_wdata;
-    logic [3:0]  active_be;
-    logic [7:0]  active_arlen;
-    logic is_iop;
-    logic aw_done, w_done;
+    // Internal Arbitration and Protocol Tracking Flags
+    logic active_is_d;
+    logic reg_aw_done;
+    logic reg_w_done;
 
-    logic [1:0] suppress_i_sr, suppress_d_sr;
-    wire suppress_i = |suppress_i_sr;
-    wire suppress_d = |suppress_d_sr;
+    // Combinational real-time handshake monitoring wires
+    logic aw_handshake_comb;
+    logic w_handshake_comb;
+    logic aw_complete;
+    logic w_complete;
 
-    always_comb begin
-        M_AXI_ARVALID = 1'b0; M_AXI_RREADY = 1'b0;
-        M_AXI_AWVALID = 1'b0; M_AXI_WVALID = 1'b0; M_AXI_BREADY = 1'b0;
+    // Fixed AXI4 Protocol Attributes (Single-Beat 32-bit Operations)
+    assign M_AXI_AWLEN   = 8'd0;
+    assign M_AXI_AWSIZE  = 3'b010; // 4 Bytes
+    assign M_AXI_AWBURST = 2'b01;  // INCR
 
-        M_AXI_ARADDR = active_addr; M_AXI_ARLEN = active_arlen;
-        M_AXI_ARSIZE = 3'b010; M_AXI_ARBURST = 2'b01;
+    assign M_AXI_ARLEN   = 8'd0;
+    assign M_AXI_ARSIZE  = 3'b010; // 4 Bytes
+    assign M_AXI_ARBURST = 2'b01;  // INCR
 
-        M_AXI_AWADDR = active_addr; M_AXI_AWLEN = 8'd0;
-        M_AXI_AWSIZE = 3'b010; M_AXI_AWBURST = 2'b01;
-        M_AXI_WDATA = active_wdata;
-        M_AXI_WSTRB = active_be;
-        M_AXI_WLAST = 1'b1;
+    assign M_AXI_WLAST   = M_AXI_WVALID;
 
-        case (state)
-            READ_ADDR: M_AXI_ARVALID = 1'b1;
-            READ_DATA: M_AXI_RREADY = 1'b1;
-            WRITE_ADDR: begin
-                M_AXI_AWVALID = !aw_done;
-                M_AXI_WVALID  = !w_done;
-            end
-            WRITE_RESP: M_AXI_BREADY = 1'b1;
-            default:;
-        endcase
-    end
-
-    assign i_mem_ready = (state == READ_ADDR) && M_AXI_ARREADY && is_iop;
-    assign d_mem_ready = (state == WRITE_ADDR && (aw_done || M_AXI_AWREADY) && (w_done || M_AXI_WREADY)) ||
-                         (!is_iop && state == READ_ADDR && M_AXI_ARREADY);
-
-    assign i_mem_rvalid = (state == READ_DATA) && M_AXI_RVALID && is_iop;
-    assign d_mem_rvalid = (state == READ_DATA) && M_AXI_RVALID && !is_iop;
-    assign i_mem_rdata = M_AXI_RDATA;
-    assign d_mem_rdata = M_AXI_RDATA;
-    assign i_mem_rlast = M_AXI_RLAST;
-    assign d_mem_rlast = M_AXI_RLAST;
+    // Calculate real-time handshake tracking
+    assign aw_handshake_comb = M_AXI_AWVALID && M_AXI_AWREADY;
+    assign w_handshake_comb  = M_AXI_WVALID  && M_AXI_WREADY;
+    
+    assign aw_complete = reg_aw_done || aw_handshake_comb;
+    assign w_complete  = reg_w_done  || w_handshake_comb;
 
     always_ff @(posedge clk or posedge reset) begin
         if (reset) begin
-            state <= IDLE;
-            is_iop <= 1'b0;
-            active_addr <= 0; active_wdata <= 0; active_be <= 0; active_arlen <= 0;
-            aw_done <= 0; w_done <= 0;
-            suppress_i_sr <= 0; suppress_d_sr <= 0;
-        end else begin
-            suppress_i_sr <= suppress_i_sr >> 1;
-            suppress_d_sr <= suppress_d_sr >> 1;
+            state         <= IDLE;
+            active_is_d   <= 1'b0;
+            reg_aw_done   <= 1'b0;
+            reg_w_done    <= 1'b0;
+
+            M_AXI_AWADDR  <= 32'b0;
+            M_AXI_AWVALID <= 1'b0;
+            M_AXI_WDATA   <= 32'b0;
+            M_AXI_WSTRB   <= 4'b0000;
+            M_AXI_WVALID  <= 1'b0;
+            M_AXI_BREADY  <= 1'b0;
+
+            M_AXI_ARADDR  <= 32'b0;
+            M_AXI_ARVALID <= 1'b0;
+            M_AXI_RREADY  <= 1'b0;
+
+            i_rdata       <= 32'b0;
+            d_rdata       <= 32'b0;
+            i_ready       <= 1'b0;
+            d_ready       <= 1'b0;
+        end
+        else begin
+            // Pulse interface flags by default
+            i_ready <= 1'b0;
+            d_ready <= 1'b0;
 
             case (state)
+
                 IDLE: begin
-                    aw_done <= 0; w_done <= 0;
-                    if (d_mem_req && d_mem_we && !suppress_d) begin
-                        active_addr <= d_mem_addr; active_wdata <= d_mem_wdata;
-                        active_be <= d_mem_be; is_iop <= 0;
-                        state <= WRITE_ADDR;
-                    end else if (d_mem_req && !d_mem_we && !suppress_d) begin
-                        active_addr <= d_mem_addr; active_arlen <= d_mem_burst_len - 1;
-                        is_iop <= 0; state <= READ_ADDR;
-                    end else if (i_mem_req && !suppress_i) begin
-                        active_addr <= i_mem_addr; active_arlen <= i_mem_burst_len - 1;
-                        is_iop <= 1; state <= READ_ADDR;
+                    reg_aw_done <= 1'b0;
+                    reg_w_done  <= 1'b0;
+
+                    if (d_req) begin
+                        active_is_d <= 1'b1;
+                        if (d_we) begin
+                            M_AXI_AWADDR  <= d_addr;
+                            M_AXI_WDATA   <= d_wdata;
+                            M_AXI_WSTRB   <= d_be;
+                            M_AXI_AWVALID <= 1'b1;
+                            M_AXI_WVALID  <= 1'b1;
+                            state         <= WRITE_EXECUTE;
+                        end else begin
+                            M_AXI_ARADDR  <= d_addr;
+                            M_AXI_ARVALID <= 1'b1;
+                            state         <= READ_ADDR;
+                        end
+                    end
+                    else if (i_req) begin
+                        active_is_d   <= 1'b0;
+                        M_AXI_ARADDR  <= i_addr;
+                        M_AXI_ARVALID <= 1'b1;
+                        state         <= READ_ADDR;
                     end
                 end
 
-                READ_ADDR: if (M_AXI_ARREADY) begin
-                    if (is_iop) suppress_i_sr <= 2'b11;
-                    else suppress_d_sr <= 2'b11;
-                    state <= READ_DATA;
-                end
-
-                READ_DATA: if (M_AXI_RVALID && M_AXI_RLAST) state <= IDLE;
-
-                WRITE_ADDR: begin
-                    if (!aw_done && M_AXI_AWREADY) aw_done <= 1;
-                    if (!w_done && M_AXI_WREADY) w_done <= 1;
-                    if ((aw_done || M_AXI_AWREADY) && (w_done || M_AXI_WREADY)) begin
-                        suppress_d_sr <= 2'b11;
-                        state <= WRITE_RESP;
+                READ_ADDR: begin
+                    if (M_AXI_ARVALID && M_AXI_ARREADY) begin
+                        M_AXI_ARVALID <= 1'b0;
+                        M_AXI_RREADY  <= 1'b1;
+                        state         <= READ_DATA;
                     end
                 end
 
-                WRITE_RESP: if (M_AXI_BVALID) state <= IDLE;
+                READ_DATA: begin
+                    if (M_AXI_RVALID && M_AXI_RREADY) begin
+                        M_AXI_RREADY <= 1'b0;
+                        if (active_is_d) begin
+                            d_rdata <= M_AXI_RDATA;
+                            d_ready <= 1'b1;  // Instant pulse notification
+                        end else begin
+                            i_rdata <= M_AXI_RDATA;
+                            i_ready <= 1'b1;  // Instant pulse notification
+                        end
+                        state <= IDLE; // Instantly ready for next transaction
+                    end
+                end
+
+                WRITE_EXECUTE: begin
+                    // Independently register completion flags as they clear
+                    if (aw_handshake_comb) begin
+                        M_AXI_AWVALID <= 1'b0;
+                        reg_aw_done   <= 1'b1;
+                    end
+                    if (w_handshake_comb) begin
+                        M_AXI_WVALID  <= 1'b0;
+                        reg_w_done    <= 1'b1;
+                    end
+
+                    // Evaluate mixed completion combining history and current state combinationally
+                    if (aw_complete && w_complete) begin
+                        M_AXI_AWVALID <= 1'b0;
+                        M_AXI_WVALID  <= 1'b0;
+                        M_AXI_BREADY  <= 1'b1;
+                        reg_aw_done   <= 1'b0;
+                        reg_w_done    <= 1'b0;
+                        state         <= WRITE_RESP;
+                    end
+                end
+
+                WRITE_RESP: begin
+                    if (M_AXI_BVALID && M_AXI_BREADY) begin
+                        M_AXI_BREADY <= 1'b0;
+                        d_ready      <= 1'b1; // Direct pulse feedback
+                        state        <= IDLE;    // Cycle directly back to serve next queue line
+                    end
+                end
+
+                default: state <= IDLE;
             endcase
         end
     end
+
 endmodule
